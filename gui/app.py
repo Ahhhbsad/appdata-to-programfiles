@@ -418,11 +418,75 @@ class AppDataMigratorGUI:
 
         FlatButton(actions, text="Refresh", command=self.refresh_apps).pack(side=tk.LEFT, padx=3)
         FlatButton(actions, text="Select All", command=self._select_all_apps).pack(side=tk.LEFT, padx=3)
-        FlatButton(actions, text="Clear", command=self._clear_selection).pack(side=tk.LEFT, padx=(3, 0))
+        FlatButton(actions, text="Clear", command=self._clear_selection).pack(side=tk.LEFT, padx=3)
+        FlatButton(
+            actions, text="Migrate to Program Files",
+            command=lambda: self._start_migration(dry_run=False),
+            bg=Palette.ACCENT, hover_bg=Palette.ACCENT_HOVER, fg="#ffffff"
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
-        # Apps Table Card
+        # Bottom Cards Row (packed BEFORE expanding table so buttons are never clipped)
+        bottom = tk.Frame(page, bg=Palette.BG)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0))
+
+        # Left Card: Inspector
+        inspector = tk.Frame(
+            bottom, bg=Palette.CARD, highlightbackground=Palette.BORDER, highlightthickness=1, padx=16, pady=12
+        )
+        inspector.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+
+        tk.Label(
+            inspector, text="Application Inspector", font=("Segoe UI", 10, "bold"),
+            bg=Palette.CARD, fg=Palette.TEXT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        self.details_text = tk.Text(
+            inspector, bg=Palette.CARD, fg=Palette.TEXT_DIM, relief="flat",
+            font=("Consolas", 9), wrap=tk.WORD, state="disabled", height=9, highlightthickness=0
+        )
+        self.details_text.pack(fill=tk.BOTH, expand=True)
+        self._set_inspector_placeholder()
+
+        # Right Card: Options & Execute
+        opts_card = tk.Frame(
+            bottom, bg=Palette.CARD, highlightbackground=Palette.BORDER, highlightthickness=1,
+            padx=16, pady=12
+        )
+        opts_card.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
+
+        tk.Label(
+            opts_card, text="Migration Tweaks", font=("Segoe UI", 10, "bold"),
+            bg=Palette.CARD, fg=Palette.TEXT
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        self.opt_junction = tk.BooleanVar(value=True)
+        self.opt_common_shortcuts = tk.BooleanVar(value=True)
+        self.opt_system_path = tk.BooleanVar(value=True)
+        self.opt_backup = tk.BooleanVar(value=True)
+        self.opt_kill_procs = tk.BooleanVar(value=False)
+
+        ToggleSwitch(opts_card, "Create NTFS Junction in AppData", self.opt_junction).pack(anchor=tk.W, pady=3)
+        ToggleSwitch(opts_card, "Promote shortcuts to All Users", self.opt_common_shortcuts).pack(anchor=tk.W, pady=3)
+        ToggleSwitch(opts_card, "Promote PATH to System Environment", self.opt_system_path).pack(anchor=tk.W, pady=3)
+        ToggleSwitch(opts_card, "Backup registry & rollback manifest", self.opt_backup).pack(anchor=tk.W, pady=3)
+        ToggleSwitch(opts_card, "Terminate running app processes", self.opt_kill_procs).pack(anchor=tk.W, pady=3)
+
+        btn_row = tk.Frame(opts_card, bg=Palette.CARD)
+        btn_row.pack(fill=tk.X, pady=(12, 0))
+
+        FlatButton(
+            btn_row, text="Dry Run", command=lambda: self._start_migration(dry_run=True),
+            bg=Palette.INPUT, hover_bg=Palette.INPUT_HOVER, fg=Palette.TEXT
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        FlatButton(
+            btn_row, text="Migrate Selected", command=lambda: self._start_migration(dry_run=False),
+            bg=Palette.ACCENT, hover_bg=Palette.ACCENT_HOVER, fg="#ffffff"
+        ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(6, 0))
+
+        # Apps Table Card (fills remaining space between header and bottom cards)
         table_card = tk.Frame(page, bg=Palette.CARD, highlightbackground=Palette.BORDER, highlightthickness=1)
-        table_card.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
+        table_card.pack(fill=tk.BOTH, expand=True)
 
         cols = ("Name", "Size", "Status", "Source", "Target", "Shortcuts")
         self.tree = ttk.Treeview(
@@ -452,65 +516,22 @@ class AppDataMigratorGUI:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        # Bottom Cards Row
-        bottom = tk.Frame(page, bg=Palette.BG)
-        bottom.pack(fill=tk.X)
+        # Right-click context menu on table
+        ctx_menu = tk.Menu(self.tree, tearoff=0, bg=Palette.CARD, fg=Palette.TEXT,
+                           activebackground=Palette.ACCENT, activeforeground="#ffffff")
+        ctx_menu.add_command(label="Migrate Selected to Program Files",
+                             command=lambda: self._start_migration(dry_run=False))
+        ctx_menu.add_command(label="Dry Run Preview",
+                             command=lambda: self._start_migration(dry_run=True))
 
-        # Left Card: Inspector
-        inspector = tk.Frame(
-            bottom, bg=Palette.CARD, highlightbackground=Palette.BORDER, highlightthickness=1, padx=16, pady=14
-        )
-        inspector.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+        def _show_ctx(event):
+            row = self.tree.identify_row(event.y)
+            if row and row not in self.tree.selection():
+                self.tree.selection_set(row)
+            if self.tree.selection():
+                ctx_menu.tk_popup(event.x_root, event.y_root)
 
-        tk.Label(
-            inspector, text="Application Inspector", font=("Segoe UI", 10, "bold"),
-            bg=Palette.CARD, fg=Palette.TEXT
-        ).pack(anchor=tk.W, pady=(0, 8))
-
-        self.details_text = tk.Text(
-            inspector, bg=Palette.CARD, fg=Palette.TEXT_DIM, relief="flat",
-            font=("Consolas", 9), wrap=tk.WORD, state="disabled", height=10, highlightthickness=0
-        )
-        self.details_text.pack(fill=tk.BOTH, expand=True)
-        self._set_inspector_placeholder()
-
-        # Right Card: Options & Execute
-        opts_card = tk.Frame(
-            bottom, bg=Palette.CARD, highlightbackground=Palette.BORDER, highlightthickness=1,
-            padx=16, pady=14, width=360
-        )
-        opts_card.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
-        opts_card.pack_propagate(False)
-
-        tk.Label(
-            opts_card, text="Migration Tweaks", font=("Segoe UI", 10, "bold"),
-            bg=Palette.CARD, fg=Palette.TEXT
-        ).pack(anchor=tk.W, pady=(0, 10))
-
-        self.opt_junction = tk.BooleanVar(value=True)
-        self.opt_common_shortcuts = tk.BooleanVar(value=True)
-        self.opt_system_path = tk.BooleanVar(value=True)
-        self.opt_backup = tk.BooleanVar(value=True)
-        self.opt_kill_procs = tk.BooleanVar(value=False)
-
-        ToggleSwitch(opts_card, "Create NTFS Junction in AppData", self.opt_junction).pack(anchor=tk.W, pady=4)
-        ToggleSwitch(opts_card, "Promote shortcuts to All Users", self.opt_common_shortcuts).pack(anchor=tk.W, pady=4)
-        ToggleSwitch(opts_card, "Promote PATH to System Environment", self.opt_system_path).pack(anchor=tk.W, pady=4)
-        ToggleSwitch(opts_card, "Backup registry & rollback manifest", self.opt_backup).pack(anchor=tk.W, pady=4)
-        ToggleSwitch(opts_card, "Terminate running app processes", self.opt_kill_procs).pack(anchor=tk.W, pady=4)
-
-        btn_row = tk.Frame(opts_card, bg=Palette.CARD)
-        btn_row.pack(fill=tk.X, side=tk.BOTTOM, pady=(14, 0))
-
-        FlatButton(
-            btn_row, text="Dry Run", command=lambda: self._start_migration(dry_run=True),
-            bg=Palette.INPUT, hover_bg=Palette.INPUT_HOVER, fg=Palette.TEXT
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-
-        FlatButton(
-            btn_row, text="Migrate Selected", command=lambda: self._start_migration(dry_run=False),
-            bg=Palette.ACCENT, hover_bg=Palette.ACCENT_HOVER, fg="#ffffff"
-        ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(6, 0))
+        self.tree.bind("<Button-3>", _show_ctx)
 
         return page
 
