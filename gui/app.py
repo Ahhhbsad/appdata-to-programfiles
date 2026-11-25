@@ -5,6 +5,9 @@ custom canvas toggle switches, and resilient background scanning.
 """
 import sys
 import os
+import shutil
+import subprocess
+import winreg
 import ctypes
 import threading
 import queue
@@ -18,6 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from core.models import InstalledApp, MigrationOptions, MigrationResult
 from core.detector import scan_for_installed_apps
 from core.migrator import Migrator
+from core.registry import delete_registry_tree, UNINSTALL_SUBKEY
 from core.rollback import RollbackManager
 from core.elevation import is_admin, request_admin
 
@@ -517,18 +521,52 @@ class AppDataMigratorGUI:
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         # Right-click context menu on table
-        ctx_menu = tk.Menu(self.tree, tearoff=0, bg=Palette.CARD, fg=Palette.TEXT,
-                           activebackground=Palette.ACCENT, activeforeground="#ffffff")
-        ctx_menu.add_command(label="Migrate Selected to Program Files",
-                             command=lambda: self._start_migration(dry_run=False))
-        ctx_menu.add_command(label="Dry Run Preview",
-                             command=lambda: self._start_migration(dry_run=True))
+        self._ctx_row: Optional[str] = None
+        ctx_menu = tk.Menu(
+            self.tree, tearoff=0, bg=Palette.CARD, fg=Palette.TEXT,
+            activebackground=Palette.ACCENT, activeforeground="#ffffff",
+            font=("Segoe UI", 9)
+        )
+        ctx_menu.add_command(
+            label="Migrate to Program Files",
+            command=lambda: self._start_migration(dry_run=False)
+        )
+        ctx_menu.add_command(
+            label="Dry Run Preview",
+            command=lambda: self._start_migration(dry_run=True)
+        )
+        ctx_menu.add_separator()
+        ctx_menu.add_command(
+            label="Select / Deselect",
+            command=self._ctx_toggle_select
+        )
+        ctx_menu.add_command(
+            label="Select All",
+            command=self._select_all_apps
+        )
+        ctx_menu.add_command(
+            label="Clear Selection",
+            command=self._clear_selection
+        )
+        ctx_menu.add_separator()
+        ctx_menu.add_command(
+            label="Show in Folder",
+            command=self._show_in_folder
+        )
+        ctx_menu.add_separator()
+        ctx_menu.add_command(
+            label="Delete App...",
+            foreground=Palette.DANGER,
+            command=self._delete_selected_apps
+        )
 
         def _show_ctx(event):
             row = self.tree.identify_row(event.y)
+            self._ctx_row = row if row else None
             if row and row not in self.tree.selection():
                 self.tree.selection_set(row)
-            if self.tree.selection():
+                self._on_tree_select(None)
+            if row or self.tree.selection():
                 ctx_menu.tk_popup(event.x_root, event.y_root)
 
         self.tree.bind("<Button-3>", _show_ctx)
@@ -760,6 +798,88 @@ class AppDataMigratorGUI:
     def _clear_selection(self):
         self.tree.selection_remove(self.tree.selection())
         self._set_inspector_placeholder()
+
+    def _ctx_toggle_select(self):
+        if not self._ctx_row:
+            return
+        if self._ctx_row in self.tree.selection():
+            self.tree.selection_remove(self._ctx_row)
+        else:
+            self.tree.selection_add(self._ctx_row)
+            self._on_tree_select(None)
+
+    def _show_in_folder(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        app = self.apps[int(sel[0])]
+        folder = app.source_path
+        if os.path.exists(folder):
+            try:
+                os.startfile(folder)
+            except Exception:
+                subprocess.Popen(["explorer.exe", folder])
+        else:
+            messagebox.showwarning("Folder Not Found", f"Directory does not exist:\n{folder}")
+
+    def _delete_selected_apps(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        selected_apps: List[InstalledApp] = [self.apps[int(i)] for i in sel]
+        summary = "\n".join(
+            f"• {a.display_name or a.name} ({a.formatted_size})\n  {a.source_path}"
+            for a in selected_apps
+        )
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Permanently delete the following {len(selected_apps)} app(s) from AppData?\n\n"
+            f"{summary}\n\n"
+            "This removes the application folder and its HKCU uninstall registry entry (if any). "
+            "This action cannot be undone.",
+            icon="warning"
+        ):
+            return
+
+        self._switch_page("log")
+        self.status_lbl.configure(text=f"Deleting {len(selected_apps)} app(s)...", fg=Palette.WARNING)
+
+        def delete_worker():
+            deleted = 0
+            failed = 0
+            for app in selected_apps:
+                name = app.display_name or app.name
+                self.log(f"\n==== Deleting {name} ====")
+                try:
+                    if app.running_pids:
+                        for pid in app.running_pids:
+                            self.log(f"Terminating PID {pid}...")
+                            subprocess.run(["taskkill.exe", "/F", "/PID", str(pid)], capture_output=True, timeout=5)
+                    if os.path.exists(app.source_path):
+                        shutil.rmtree(app.source_path)
+                        self.log(f"Deleted folder: {app.source_path}")
+                    if app.registry_key_name:
+                        sub = f"{UNINSTALL_SUBKEY}\\{app.registry_key_name}"
+                        ok, msg = delete_registry_tree(winreg.HKEY_CURRENT_USER, sub)
+                        self.log(f"Registry cleanup: {msg}")
+                    deleted += 1
+                    self.log(f"SUCCESS: Deleted {name}")
+                except Exception as e:
+                    failed += 1
+                    self.log(f"ERROR deleting {name}: {e}")
+
+            self.ui_queue.put(lambda: self._on_delete_completed(deleted, failed))
+
+        threading.Thread(target=delete_worker, daemon=True).start()
+
+    def _on_delete_completed(self, deleted: int, failed: int):
+        if failed == 0:
+            self.status_lbl.configure(text=f"Deleted {deleted} app(s).", fg=Palette.SUCCESS)
+            messagebox.showinfo("Delete Complete", f"Successfully deleted {deleted} app(s).")
+        else:
+            self.status_lbl.configure(text=f"Delete finished: {deleted} deleted, {failed} failed.", fg=Palette.WARNING)
+            messagebox.showwarning("Delete Finished with Errors", f"{deleted} deleted, {failed} failed. Check Execution Log.")
+        self.refresh_apps()
 
     def _on_tree_select(self, _event):
         sel = self.tree.selection()
